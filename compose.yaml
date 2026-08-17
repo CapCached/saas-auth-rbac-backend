@@ -1,0 +1,62 @@
+name: saas-auth-rbac
+
+services:
+  api:
+    build:
+      context: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ACCESS_TOKEN_TTL_SECONDS: "300"
+      CORS_ORIGINS: "http://localhost:3001"
+      DATABASE_URL: "postgres://auth:auth@postgres:5432/auth"
+      HOST: "0.0.0.0"
+      JWT_AUDIENCE: "http://localhost:3000"
+      JWT_ISSUER: "http://localhost:3000"
+      LOG_LEVEL: "info"
+      METRICS_TOKEN: "local-metrics-token-change-before-sharing"
+      NODE_ENV: "development"
+      PASSWORD_PEPPER: "local-password-pepper-change-before-sharing"
+      RATE_LIMIT_FAIL_CLOSED: "true"
+      REDIS_URL: "redis://redis:6379"
+      TOKEN_PEPPER: "local-token-pepper-change-before-sharing-000"
+      WORKER_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+
+  postgres:
+    environment:
+      POSTGRES_DB: auth
+      POSTGRES_PASSWORD: auth
+      POSTGRES_USER: auth
+    healthcheck:
+      interval: 5s
+      retries: 10
+      test: ["CMD-SHELL", "pg_isready -U auth -d auth"]
+      timeout: 3s
+    image: postgres:17-alpine
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      interval: 5s
+      retries: 10
+      test: ["CMD", "redis-cli", "ping"]
+      timeout: 3s
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+
+volumes:
+  postgres-data:
+  redis-data:

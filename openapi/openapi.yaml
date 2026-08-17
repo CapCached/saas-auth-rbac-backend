@@ -1,0 +1,735 @@
+openapi: 3.1.0
+info:
+  title: SaaS Auth & RBAC API
+  version: 0.1.0
+  description: >-
+    Multi-tenant authentication and organization-scoped RBAC. Access tokens are short-lived JWTs;
+    refresh tokens are opaque, one-use credentials. All scoped routes require x-organization-id.
+security: []
+servers:
+  - url: https://{apiHost}
+    description: Replace with the deployed API hostname; local development uses http://localhost:3000.
+    variables:
+      apiHost:
+        default: auth.saas.invalid
+tags:
+  - name: Authentication
+    description: Credentials, access and refresh tokens, identity, and password recovery.
+  - name: Organizations
+    description: Tenant lifecycle and organization selection.
+  - name: RBAC
+    description: Permission catalog, roles, memberships, invitations, and audit events.
+  - name: Sessions
+    description: User-controlled device session inventory and revocation.
+  - name: Projects
+    description: Example tenant-scoped domain resources demonstrating authorization boundaries.
+  - name: Operations
+    description: Liveness, readiness, metrics, and service integration metadata.
+paths:
+  /health/live:
+    get:
+      operationId: getHealthLive
+      tags: [Operations]
+      summary: Process liveness
+      responses:
+        "200":
+          description: Process is alive
+  /health/ready:
+    get:
+      operationId: getHealthReady
+      tags: [Operations]
+      summary: PostgreSQL and Redis readiness
+      responses:
+        "200":
+          description: Dependencies are ready
+        "503":
+          description: A dependency is unavailable
+  /.well-known/jwks.json:
+    get:
+      operationId: getJwks
+      tags: [Authentication]
+      summary: Access-token verification keys
+      responses:
+        "200":
+          description: JSON Web Key Set
+  /v1/auth/register:
+    post:
+      operationId: register
+      tags: [Authentication]
+      summary: Create a user, organization, owner role, and session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/TokenResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/auth/login:
+    post:
+      operationId: login
+      tags: [Authentication]
+      summary: Authenticate and create or replace a device session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/TokenResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/auth/refresh:
+    post:
+      operationId: refreshSession
+      tags: [Authentication]
+      summary: Rotate a one-use refresh token
+      description: Reuse of a consumed token revokes the complete token family and its session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/TokenResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/auth/logout:
+    post:
+      operationId: logout
+      tags: [Authentication]
+      summary: Revoke the current session and its refresh tokens
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Session revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/auth/password/forgot:
+    post:
+      operationId: requestPasswordReset
+      tags: [Authentication]
+      summary: Request password-reset delivery
+      description: Always returns the same accepted response, whether or not the account exists.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+      responses:
+        "202":
+          description: Request accepted
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/auth/password/reset:
+    post:
+      operationId: resetPassword
+      tags: [Authentication]
+      summary: Consume a single-use reset token and revoke all sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token, newPassword]
+              properties:
+                token:
+                  type: string
+                newPassword:
+                  $ref: "#/components/schemas/Password"
+      responses:
+        "204":
+          description: Password replaced; user must log in again
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/me:
+    get:
+      operationId: getCurrentUser
+      tags: [Authentication]
+      summary: Current authenticated identity
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current identity
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/sessions:
+    get:
+      operationId: listSessions
+      tags: [Sessions]
+      summary: List the current user's device sessions
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Sessions
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/sessions/{sessionId}:
+    delete:
+      operationId: revokeSession
+      tags: [Sessions]
+      summary: Revoke one of the current user's sessions
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Session revoked
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/organizations:
+    get:
+      operationId: listOrganizations
+      tags: [Organizations]
+      summary: List active organizations for the current user
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Organizations and role names
+    post:
+      operationId: createOrganization
+      tags: [Organizations]
+      summary: Create an organization and become its owner
+      security:
+        - bearerAuth: []
+      requestBody:
+        $ref: "#/components/requestBodies/Name"
+      responses:
+        "201":
+          description: Organization created
+  /v1/organization:
+    patch:
+      operationId: updateOrganization
+      tags: [Organizations]
+      summary: Rename the selected organization
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      requestBody:
+        $ref: "#/components/requestBodies/Name"
+      responses:
+        "200":
+          description: Organization updated
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    delete:
+      operationId: archiveOrganization
+      tags: [Organizations]
+      summary: Archive the selected organization and revoke all member sessions
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      responses:
+        "204":
+          description: Organization archived
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /v1/permissions:
+    get:
+      operationId: listPermissions
+      tags: [RBAC]
+      summary: List the versioned application permission catalog
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      responses:
+        "200":
+          description: Permission catalog
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /v1/roles:
+    get:
+      operationId: listRoles
+      tags: [RBAC]
+      summary: List roles and effective permissions
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      responses:
+        "200":
+          description: Roles
+    post:
+      operationId: createRole
+      tags: [RBAC]
+      summary: Create a custom role
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      requestBody:
+        $ref: "#/components/requestBodies/Role"
+      responses:
+        "201":
+          description: Role created
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /v1/roles/{roleId}:
+    put:
+      operationId: updateRole
+      tags: [RBAC]
+      summary: Replace a custom role definition
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+        - $ref: "#/components/parameters/RoleId"
+      requestBody:
+        $ref: "#/components/requestBodies/Role"
+      responses:
+        "200":
+          description: Role updated and affected refresh tokens revoked
+        "409":
+          $ref: "#/components/responses/Conflict"
+    delete:
+      operationId: deleteRole
+      tags: [RBAC]
+      summary: Delete a custom role
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+        - $ref: "#/components/parameters/RoleId"
+      responses:
+        "204":
+          description: Role deleted
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /v1/members:
+    get:
+      operationId: listMembers
+      tags: [RBAC]
+      summary: List organization members and roles
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      responses:
+        "200":
+          description: Members
+  /v1/members/{userId}/roles:
+    put:
+      operationId: setMemberRoles
+      tags: [RBAC]
+      summary: Atomically replace a member's roles
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [roleIds]
+              properties:
+                roleIds:
+                  type: array
+                  maxItems: 50
+                  uniqueItems: true
+                  items:
+                    type: string
+                    format: uuid
+      responses:
+        "204":
+          description: Roles replaced and refresh tokens revoked
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /v1/members/{userId}:
+    delete:
+      operationId: removeMember
+      tags: [RBAC]
+      summary: Remove an organization member
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Member removed
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /v1/invitations:
+    post:
+      operationId: createInvitation
+      tags: [RBAC]
+      summary: Create or replace an invitation for an email
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, roleId]
+              properties:
+                email:
+                  type: string
+                  format: email
+                roleId:
+                  type: string
+                  format: uuid
+      responses:
+        "201":
+          description: Invitation queued for delivery
+  /v1/invitations/accept:
+    post:
+      operationId: acceptInvitation
+      tags: [RBAC]
+      summary: Accept an invitation matching the authenticated email
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token]
+              properties:
+                token:
+                  type: string
+      responses:
+        "200":
+          description: Membership activated
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/audit-events:
+    get:
+      operationId: listAuditEvents
+      tags: [RBAC]
+      summary: List up to 100 organization audit events
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+        - name: before
+          in: query
+          schema:
+            type: string
+            pattern: "^[0-9]+$"
+      responses:
+        "200":
+          description: Reverse-chronological audit events
+  /v1/projects:
+    get:
+      operationId: listProjects
+      tags: [Projects]
+      summary: List tenant-scoped example projects
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      responses:
+        "200":
+          description: Projects
+    post:
+      operationId: createProject
+      tags: [Projects]
+      summary: Create a tenant-scoped example project
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      requestBody:
+        $ref: "#/components/requestBodies/Name"
+      responses:
+        "201":
+          description: Project created
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /v1/projects/{projectId}:
+    put:
+      operationId: updateProject
+      tags: [Projects]
+      summary: Rename a project within the selected tenant
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+        - $ref: "#/components/parameters/ProjectId"
+      requestBody:
+        $ref: "#/components/requestBodies/Name"
+      responses:
+        "200":
+          description: Project updated
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteProject
+      tags: [Projects]
+      summary: Delete a project within the selected tenant
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+        - $ref: "#/components/parameters/ProjectId"
+      responses:
+        "204":
+          description: Project deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    OrganizationId:
+      name: x-organization-id
+      in: header
+      required: true
+      description: Active organization context; never taken from the access token.
+      schema:
+        type: string
+        format: uuid
+    RoleId:
+      name: roleId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ProjectId:
+      name: projectId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  requestBodies:
+    Name:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [name]
+            properties:
+              name:
+                type: string
+                minLength: 1
+                maxLength: 120
+    Role:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RoleWrite"
+  responses:
+    TokenResponse:
+      description: Authenticated token pair
+      headers:
+        Cache-Control:
+          schema:
+            type: string
+          description: Always `no-store`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TokenResponse"
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Unauthorized:
+      description: Missing, invalid, expired, or revoked authentication
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Forbidden:
+      description: Authenticated but missing the required permission
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    NotFound:
+      description: Resource absent or hidden by an organization boundary
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Conflict:
+      description: State invariant or uniqueness conflict
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    RateLimited:
+      description: Rate budget exhausted
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+  schemas:
+    Password:
+      type: string
+      minLength: 12
+      maxLength: 128
+      writeOnly: true
+    Device:
+      type: object
+      required: [deviceId]
+      properties:
+        deviceId:
+          type: string
+          minLength: 8
+          maxLength: 200
+        deviceName:
+          type: string
+          maxLength: 120
+    RegisterRequest:
+      allOf:
+        - $ref: "#/components/schemas/Device"
+        - type: object
+          additionalProperties: false
+          required: [email, password, organizationName]
+          properties:
+            email:
+              type: string
+              format: email
+            password:
+              $ref: "#/components/schemas/Password"
+            organizationName:
+              type: string
+              minLength: 1
+              maxLength: 120
+    LoginRequest:
+      allOf:
+        - $ref: "#/components/schemas/Device"
+        - type: object
+          additionalProperties: false
+          required: [email, password]
+          properties:
+            email:
+              type: string
+              format: email
+            password:
+              $ref: "#/components/schemas/Password"
+    TokenResponse:
+      type: object
+      required: [access_token, expires_in, refresh_token, token_type, user]
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        expires_in:
+          type: integer
+        token_type:
+          const: Bearer
+        organization_id:
+          type: string
+          format: uuid
+        user:
+          type: object
+          required: [id, email]
+          properties:
+            id:
+              type: string
+              format: uuid
+            email:
+              type: string
+              format: email
+    RoleWrite:
+      type: object
+      additionalProperties: false
+      required: [name, permissionIds]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        description:
+          type: string
+          maxLength: 500
+        permissionIds:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            request_id:
+              type: string
+            details:
+              type: object
+              additionalProperties: true

@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  cancel-in-progress: true
+  group: ci-${{ github.ref }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        env:
+          POSTGRES_DB: auth_test
+          POSTGRES_PASSWORD: auth
+          POSTGRES_USER: auth
+        image: postgres:17-alpine
+        options: >-
+          --health-cmd "pg_isready -U auth -d auth_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+        ports:
+          - 6379:6379
+    env:
+      RUN_INTEGRATION_TESTS: "true"
+      TEST_DATABASE_URL: postgres://auth:auth@127.0.0.1:5432/auth_test
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          cache: npm
+          node-version: 24
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Type-check
+        run: npm run typecheck
+      - name: Validate OpenAPI contract
+        run: npm run openapi:lint
+      - name: Test with PostgreSQL
+        run: npm run test:coverage
+      - name: Build
+        run: npm run build
+      - name: Audit runtime dependencies
+        run: npm audit --omit=dev --audit-level=high
+      - name: Build production image
+        run: docker build --tag saas-auth-rbac:${{ github.sha }} .
