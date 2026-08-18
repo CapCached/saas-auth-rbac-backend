@@ -1,5 +1,55 @@
 # Production-Style SaaS Auth & RBAC Backend
 
+[![CI](https://github.com/CapCached/saas-auth-rbac-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/CapCached/saas-auth-rbac-backend/actions/workflows/ci.yml)
+
+An API-first, multi-tenant authentication and organization-scoped RBAC service built as a strict TypeScript monolith.
+It is intended to be adopted by an early-stage SaaS without hiding authorization inside controller conditionals.
+
+### What is implemented
+
+- Ed25519 access JWTs with key IDs, JWKS publication, fixed algorithm/type, issuer, and audience validation
+- Argon2id password hashing with a separately managed pepper
+- Opaque refresh tokens with transactional rotation, replay detection, and token-family revocation
+- Password reset, organization invitations, device sessions, and explicit revocation
+- Organization-scoped roles, a migration-managed permission catalog, last-owner protection, and live authorization
+- Tenant-scoped example resources that demonstrate IDOR-safe query boundaries
+- Append-only audit events, Prometheus metrics, Redis rate limits, and a transactional outbox worker
+- PostgreSQL migrations, Docker/Compose, OpenAPI 3.1, strict lint/type checks, and PostgreSQL integration tests
+
+This is a production engineering baseline, not a claim of compliance or zero defects. Before real customer data, use
+the release gate in [the operations runbook](docs/operations.md), including an independent security review and a
+staging restore exercise.
+
+### Five-minute local start
+
+```bash
+docker compose up --build
+```
+
+The API listens on `http://localhost:3000`; its machine-readable contract is at
+[`/openapi.yaml`](http://localhost:3000/openapi.yaml). Compose binds PostgreSQL and Redis to loopback and uses
+development-only credentials. The API generates an ephemeral Ed25519 key locally, so access tokens intentionally stop
+working after a restart.
+
+Register the first tenant:
+
+```bash
+curl --request POST http://localhost:3000/v1/auth/register \
+  --header 'content-type: application/json' \
+  --data '{
+    "email":"owner@example.com",
+    "password":"correct horse battery staple",
+    "organizationName":"Example",
+    "deviceId":"browser-00000001",
+    "deviceName":"Local browser"
+  }'
+```
+
+Use the returned access token as `Authorization: Bearer …` and the returned organization ID as
+`x-organization-id` on every organization-scoped route.
+
+---
+
 ## Problem Statement
 
 Authentication and authorization systems in early-stage SaaS products
@@ -191,27 +241,16 @@ This avoids silent authorization regressions in live systems.
 
 ### RBAC Change Consistency
 
-RBAC changes follow a strict ordering:
-
-1. Persist role and permission changes in the database
-2. Invalidate relevant cache entries
-3. Revoke active refresh tokens for affected users
-
-If cache invalidation or token revocation fails after the database commit,
-the system tolerates short-lived inconsistency.
-Retries are performed asynchronously until completion.
-
-Authorization decisions always fall back to the database
-if cached data is missing or invalidated.
+RBAC changes and affected refresh-token revocations commit in the same PostgreSQL transaction. Authorization decisions
+are read from PostgreSQL on every request, so a permission removal takes effect even for a still-valid access token.
+This deliberately favors consistency and auditability over a lower authorization-query latency.
 
 ### Permission Caching Strategy
 
-Cached data includes:
-- user → role mappings per organization
-- role → permission sets
-
-Cache entries are invalidated on role or permission changes.  
-A small staleness window is acceptable but bounded by refresh token rotation.
+Permission caching is intentionally disabled in this release. Redis is used for atomic distributed rate limits, while
+PostgreSQL remains authoritative for every authorization decision. A future cache must version both user-role and
+role-permission mappings, invalidate them transactionally through the outbox, and retain database fallback; it should
+be introduced only after measured authorization latency justifies the additional stale-access risk.
 
 ---
 
@@ -379,6 +418,7 @@ Flow:
 - Unit tests for permission evaluation logic
 - Integration tests enforcing organization boundaries
 - Regression tests covering role changes and token invalidation
+- Adversarial HTTP tests for cross-tenant ID guessing, privilege escalation, last-owner removal, and refresh replay
 
 Auth logic is treated as high-risk and tested accordingly.
 
@@ -386,21 +426,48 @@ Auth logic is treated as high-risk and tested accordingly.
 
 ## Code Structure
 
-- auth/        authentication and token handling
-- rbac/        roles, permissions, enforcement
-- middleware/  auth, org context, rate limiting
-- workers/     async side effects
+- `src/security/` — passwords, JWTs, opaque tokens, and rate limiting
+- `src/services/` — authentication and authorization use cases
+- `src/store/` — parameterized, organization-scoped PostgreSQL access
+- `src/routes/` and `src/http/` — API boundary, validation, and centralized guards
+- `src/workers/` — bounded-retry transactional outbox delivery
+- `migrations/` — immutable schema and permission catalog
+- `openapi/` — client-facing OpenAPI 3.1 contract
+- `tests/` — unit, HTTP-boundary, and PostgreSQL adversarial tests
 
 ---
 
 ## Running Locally
 
-- Docker-based setup `docker compose up`
-- Environment variables documented in `.env.example`
-- Single command to start all services
+Docker is the supported local path:
+
+```bash
+docker compose up --build
+```
+
+For host development with your own PostgreSQL and Redis:
+
+```bash
+cp .env.example .env
+npm ci
+npm run keys:generate  # copy the three emitted JWT values into .env
+npm run migrate
+npm run dev
+```
+
+Verification commands:
+
+```bash
+npm run check
+TEST_DATABASE_URL=postgres://auth:auth@localhost:5432/auth_test npm run test:integration
+```
+
+Production deployment is deliberately fail-closed if signing keys, Redis, CORS origins, the metrics token, or the
+signed HTTPS outbox webhook are missing. See [.env.example](.env.example), [the API contract](openapi/openapi.yaml),
+[the threat model](docs/threat-model.md), and [the operations runbook](docs/operations.md).
 
 Example flow:  
 create org → create user → assign role → call protected endpoint
 
-This system is not designed for regulated workloads.  
-Audit logging and access controls provide a foundation for future compliance work.
+This system is not certified for regulated workloads. Audit logging and access controls provide a foundation for a
+future compliance program; they are not a substitute for one.
